@@ -113,7 +113,7 @@ export default function Layout() {
 
   function handleLogout() { logout(); nav("/login") }
 
-  const isAdmin = user?.role === "admin" || user?.role === "superadmin"
+  const isAdmin = user?.role === "admin" || user?.role === "superadmin" || user?.role === "elder_race"
 
   const navItems = [
     { to: "/dashboard", label: "Dashboard", icon: "⬡" },
