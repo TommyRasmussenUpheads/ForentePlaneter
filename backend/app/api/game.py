@@ -119,6 +119,13 @@ async def reset_game(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
+    from app.models.game import TickLog, CombatLog, Ship, FleetMission, FleetMissionShip, BuildQueue
+    await db.execute(delete(FleetMissionShip))
+    await db.execute(delete(FleetMission))
+    await db.execute(delete(BuildQueue))
+    await db.execute(delete(Ship))
+    await db.execute(delete(CombatLog))
+    await db.execute(delete(TickLog))
     await db.execute(delete(Planet))
     await db.execute(delete(SystemRoute))
     await db.execute(delete(SolarSystem))
