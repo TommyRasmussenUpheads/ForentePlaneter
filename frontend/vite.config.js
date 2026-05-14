@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
+    allowedHosts: ['fp.skydotten.no', 'localhost', '127.0.0.1'],
     port: 5173,
     proxy: {
       '/api': {
