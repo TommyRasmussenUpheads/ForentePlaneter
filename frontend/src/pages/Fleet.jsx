@@ -16,6 +16,7 @@ const SHIP_COLORS = {
 
 export default function Fleet() {
   const { token } = useAuth()
+  const isMobile = useIsMobile()
   const [ships, setShips] = useState(null)
   const [missions, setMissions] = useState([])
   const [stats, setStats] = useState(null)
@@ -99,7 +100,6 @@ export default function Fleet() {
   )
 
   const planets = system?.planets || []
-  const homePlanet = planets.find(p => p.type === "home")
   const shipsOnSelected = ships?.locations?.[buildForm.planet_id]?.ships || {}
 
   return (
@@ -112,7 +112,7 @@ export default function Fleet() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 16 }}>
-        {/* My ships */}
+        {/* Mine skip */}
         <div className="card">
           <div className="label" style={{ marginBottom: 14 }}>Mine skip</div>
           {!ships || Object.keys(ships.locations).length === 0 ? (
@@ -140,7 +140,7 @@ export default function Fleet() {
           ))}
         </div>
 
-        {/* Active missions */}
+        {/* Aktive oppdrag */}
         <div className="card">
           <div className="label" style={{ marginBottom: 14 }}>Aktive oppdrag</div>
           {missions.length === 0 ? (
@@ -182,7 +182,7 @@ export default function Fleet() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
-        {/* Build ships */}
+        {/* Bygg skip */}
         <div className="card">
           <div className="label" style={{ marginBottom: 14 }}>Bygg skip</div>
           {buildMsg && <div style={{ background: "rgba(0,229,204,0.1)", border: "1px solid var(--teal)", borderRadius: "var(--radius)", padding: "8px 12px", fontFamily: "var(--mono)", fontSize: 12, color: "var(--teal)", marginBottom: 12 }}>✓ {buildMsg}</div>}
@@ -197,7 +197,7 @@ export default function Fleet() {
             <div style={{ marginBottom: 12 }}>
               <div className="label" style={{ marginBottom: 6 }}>Skiptype</div>
               <select value={buildForm.ship_type} onChange={e => setBuildForm(f => ({ ...f, ship_type: e.target.value }))}>
-                {stats && Object.entries(stats).filter(([k]) => k !== "planet_defense" || true).map(([type, s]) => (
+                {stats && Object.entries(stats).map(([type, s]) => (
                   <option key={type} value={type}>
                     {type} — Atk:{s.atk} Def:{s.def} — {s.cost_metal}M {s.cost_energy}E {s.cost_gas}G ({s.build_ticks}t)
                   </option>
@@ -218,7 +218,7 @@ export default function Fleet() {
           </form>
         </div>
 
-        {/* Send fleet */}
+        {/* Send flåte */}
         <div className="card">
           <div className="label" style={{ marginBottom: 14 }}>Send flåte</div>
           {sendMsg && <div style={{ background: "rgba(0,229,204,0.1)", border: "1px solid var(--teal)", borderRadius: "var(--radius)", padding: "8px 12px", fontFamily: "var(--mono)", fontSize: 12, color: "var(--teal)", marginBottom: 12 }}>✓ {sendMsg}</div>}
