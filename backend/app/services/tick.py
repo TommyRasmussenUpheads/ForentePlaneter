@@ -81,7 +81,7 @@ async def _process_tick(db: AsyncSession):
     planet_list = list(all_planets.all())
 
     for planet in planet_list:
-        if planet.planet_type == "home" and planet.owner_id:
+        if planet.planet_type in ("home", "elder_race") and planet.owner_id:
             planet.metal  += planet.metal_production
             planet.energy += planet.energy_production
             planet.gas    += planet.gas_production

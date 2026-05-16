@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import { useIsMobile } from "../hooks/useMediaQuery"
 import { useAuth } from "../context/AuthContext"
 import { apiFetch } from "../api"
 
@@ -110,7 +111,7 @@ export default function Fleet() {
         <h1 style={{ fontWeight: 700, fontSize: 24 }}>Flåte & Skip</h1>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 16 }}>
         {/* My ships */}
         <div className="card">
           <div className="label" style={{ marginBottom: 14 }}>Mine skip</div>
@@ -180,7 +181,7 @@ export default function Fleet() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
         {/* Build ships */}
         <div className="card">
           <div className="label" style={{ marginBottom: 14 }}>Bygg skip</div>
