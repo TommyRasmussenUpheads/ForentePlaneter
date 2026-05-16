@@ -17,9 +17,14 @@ app = FastAPI(
     redoc_url=None,
 )
 
+# Bygg liste over tillatte origins fra kommaseparert env-variabel
+# Eksempel: CORS_ORIGINS=https://fp.skydotten.no,https://claude.ai,http://localhost:5173
+_raw_origins = settings.cors_origins or settings.game_base_url
+allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.game_base_url],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

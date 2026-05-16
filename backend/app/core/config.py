@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     invite_reward_energy: int = 10000
     invite_reward_gas: int = 10000
 
+    # CORS — kommaseparert liste over tillatte origins
+    # Eksempel: https://fp.skydotten.no,https://claude.ai,http://localhost:5173
+    cors_origins: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = False
