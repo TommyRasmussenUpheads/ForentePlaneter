@@ -68,3 +68,20 @@ class Planet(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     solar_system: Mapped["SolarSystem"] = relationship("SolarSystem", back_populates="planets")
+
+
+class ExploredSystem(Base):
+    __tablename__ = "explored_systems"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True, nullable=False
+    )
+    system_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("solar_systems.id", ondelete="CASCADE"),
+        primary_key=True, nullable=False
+    )
+    explored_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc)
+    )

@@ -10,33 +10,37 @@ Order of operations:
 5.  Resolve arrivals:
       a. Transport missions → deliver cargo
       b. Attack missions → combat
-      c. Return missions → ships back to origin
+      c. Expedition missions → reveal fog of war
+      d. Return missions → ships back to origin
 6.  Update blockade status
 7.  NPC defense respawn (every 6 ticks)
 8.  Calculate scores
 9.  Check round end
 10. Write tick log
 """
-import json
 import logging
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete, text
+from sqlalchemy import select, delete, text
 
 from app.core.database import AsyncSessionLocal
-from app.models.galaxy import GameRound, Planet, SolarSystem
+from app.models.galaxy import GameRound, Planet, SolarSystem, SystemRoute
 from app.models.game import (
     Ship, FleetMission, FleetMissionShip,
     BuildQueue, CombatLog, TickLog, Notification,
 )
 from app.models.user import User
 from app.services.combat import Fleet, resolve_combat
+from app.services.visibility import (
+    reveal_system_and_neighbors,
+    reveal_neighbors_of_own_system,
+)
 
 log = logging.getLogger(__name__)
 
-NPC_RESPAWN_INTERVAL = 6   # ticks between NPC defense respawns
-NPC_RESPAWN_AMOUNT = 2     # planetforsvar added per respawn
+NPC_RESPAWN_INTERVAL = 6
+NPC_RESPAWN_AMOUNT = 2
 
 
 async def process_tick_async():
@@ -99,7 +103,6 @@ async def _process_tick(db: AsyncSession):
                 planets_processed += 1
 
     # ── 3. Advance build queues ───────────────────────────────
-    # Hent alle aktive (building/queued) rader, gruppert per planet
     building = await db.scalars(
         select(BuildQueue).where(
             BuildQueue.status.in_(["building", "queued"])
@@ -107,7 +110,6 @@ async def _process_tick(db: AsyncSession):
     )
     build_list = list(building.all())
 
-    # Grupper per planet
     planet_building: dict[str, list[BuildQueue]] = {}
     for bq in build_list:
         pid = str(bq.planet_id)
@@ -116,19 +118,15 @@ async def _process_tick(db: AsyncSession):
         planet_building[pid].append(bq)
 
     for pid, items in planet_building.items():
-        # Sørg for at første i køen har status "building"
         active = items[0]
         if active.status != "building":
             active.status = "building"
 
-        # Tell ned én tick
         active.ticks_remaining -= 1
 
         if active.ticks_remaining <= 0:
-            # Skipet er ferdig bygget
             active.status = "completed"
 
-            # Legg til skipet på planeten
             existing = await db.scalar(
                 select(Ship).where(
                     Ship.planet_id == active.planet_id,
@@ -146,20 +144,40 @@ async def _process_tick(db: AsyncSession):
                     quantity=active.quantity,
                 ))
 
-            # Varsle spilleren
-            db.add(Notification(
-                user_id=active.owner_id,
-                type="build_complete",
-                title=f"1× {active.ship_type} ferdigbygd",
-                body=f"Skipet er klart på planeten din.",
-                related_id=active.planet_id,
-            ))
+            # ── Fog of war: første ekspedisjonsskip bygget ───
+            if active.ship_type == "expedition" and active.owner_id:
+                owner = await db.get(User, active.owner_id)
+                if owner and not owner.has_built_expedition:
+                    owner.has_built_expedition = True
+                    newly_revealed = await reveal_neighbors_of_own_system(db, active.owner_id)
+                    log.info(f"Player {owner.username} built first expedition — revealed {len(newly_revealed)} neighbors")
+                    db.add(Notification(
+                        user_id=active.owner_id,
+                        type="expedition_built",
+                        title="Ekspedisjonsskip ferdigbygd",
+                        body=f"Nabosystemene til ditt solsystem er nå synlige på kartet. Send ekspedisjonsskipet ut for å utforske videre!",
+                        related_id=active.planet_id,
+                    ))
+                else:
+                    db.add(Notification(
+                        user_id=active.owner_id,
+                        type="build_complete",
+                        title="1× expedition ferdigbygd",
+                        body="Ekspedisjonsskipet er klart på planeten din.",
+                        related_id=active.planet_id,
+                    ))
+            else:
+                db.add(Notification(
+                    user_id=active.owner_id,
+                    type="build_complete",
+                    title=f"1× {active.ship_type} ferdigbygd",
+                    body="Skipet er klart på planeten din.",
+                    related_id=active.planet_id,
+                ))
 
-            # Promoter neste i køen til "building"
+            # Promoter neste i køen
             if len(items) > 1:
-                next_item = items[1]
-                next_item.status = "building"
-                log.debug(f"Promoted queue item {next_item.id} ({next_item.ship_type}) to building")
+                items[1].status = "building"
 
     # ── 4 & 5. Move fleets and resolve arrivals ───────────────
     in_flight = await db.scalars(
@@ -174,22 +192,62 @@ async def _process_tick(db: AsyncSession):
             continue
 
         mission_ships_rows = await db.scalars(
-            select(FleetMissionShip).where(
-                FleetMissionShip.mission_id == mission.id
-            )
+            select(FleetMissionShip).where(FleetMissionShip.mission_id == mission.id)
         )
         mission_ships = {r.ship_type: r.quantity for r in mission_ships_rows.all()}
 
         target_planet = await db.get(Planet, mission.target_planet_id)
         origin_planet = await db.get(Planet, mission.origin_planet_id)
 
-        # ── Transport mission ─────────────────────────────────
+        if not target_planet or not origin_planet:
+            mission.status = "completed"
+            continue
+
+        target_system = await db.get(SolarSystem, target_planet.solar_system_id)
+        inter_system = target_planet.solar_system_id != origin_planet.solar_system_id
+
+        # ── Fog of war: avslør ved ankomst til annet system ──
+        if inter_system and mission.owner_id:
+            newly_revealed = await reveal_system_and_neighbors(
+                db, mission.owner_id, target_planet.solar_system_id
+            )
+            if newly_revealed and target_system:
+                revealed_systems = []
+                for sid in newly_revealed:
+                    sys = await db.get(SolarSystem, sid)
+                    if sys:
+                        revealed_systems.append(sys)
+
+                neighbors = [s for s in revealed_systems if s.id != target_planet.solar_system_id]
+                neighbor_names = ", ".join(s.name for s in neighbors[:3])
+                if len(neighbors) > 3:
+                    neighbor_names += f" og {len(neighbors)-3} til"
+
+                system_type = (
+                    "Elder Race-system" if target_system.is_elder_race else
+                    "ukjent region"     if target_system.is_unknown_region else
+                    "NPC-system"        if target_system.is_npc else
+                    "spillersystem"
+                )
+
+                body = f"Type: {system_type}."
+                if neighbor_names:
+                    body += f" Nabosystemer oppdaget: {neighbor_names}."
+
+                db.add(Notification(
+                    user_id=mission.owner_id,
+                    type="system_explored",
+                    title=f"Ekspedisjon ankommet: {target_system.name}",
+                    body=body,
+                    related_id=target_planet.solar_system_id,
+                ))
+
+        # ── Transport ─────────────────────────────────────────
         if mission.mission_type == "transport":
-            if target_planet and target_planet.owner_id == mission.owner_id:
+            if target_planet.owner_id == mission.owner_id:
                 target_planet.metal  += mission.cargo_metal
                 target_planet.energy += mission.cargo_energy
                 target_planet.gas    += mission.cargo_gas
-                mission.status = "completed"
                 for ship_type, qty in mission_ships.items():
                     await _return_ships(db, mission.owner_id, origin_planet.id, ship_type, qty, tick)
                 db.add(Notification(
@@ -200,19 +258,15 @@ async def _process_tick(db: AsyncSession):
                     related_id=target_planet.id,
                 ))
             else:
-                mission.status = "completed"
                 for ship_type, qty in mission_ships.items():
                     await _return_ships(db, mission.owner_id, origin_planet.id, ship_type, qty, tick)
+            mission.status = "completed"
             missions_resolved += 1
 
-        # ── Attack mission ────────────────────────────────────
+        # ── Attack ────────────────────────────────────────────
         elif mission.mission_type == "attack":
-            if not target_planet:
-                mission.status = "completed"
-                continue
-
             expedition_qty = mission_ships.pop("expedition", 0)
-            diplomat_qty = mission_ships.pop("diplomat", 0)
+            mission_ships.pop("diplomat", 0)
 
             defender_ships_rows = await db.scalars(
                 select(Ship).where(Ship.planet_id == target_planet.id)
@@ -223,11 +277,13 @@ async def _process_tick(db: AsyncSession):
                     defender_fleet_ships[s.ship_type] = defender_fleet_ships.get(s.ship_type, 0) + s.quantity
 
             attacker = Fleet(owner_id=str(mission.owner_id), ships=mission_ships)
-            defender = Fleet(owner_id=str(target_planet.owner_id) if target_planet.owner_id else "npc", ships=defender_fleet_ships)
-
+            defender = Fleet(
+                owner_id=str(target_planet.owner_id) if target_planet.owner_id else "npc",
+                ships=defender_fleet_ships,
+            )
             result = resolve_combat(attacker, defender, target_planet.planet_type == "home")
 
-            combat_entry = CombatLog(
+            db.add(CombatLog(
                 tick_number=tick,
                 planet_id=target_planet.id,
                 attacker_id=mission.owner_id,
@@ -236,69 +292,37 @@ async def _process_tick(db: AsyncSession):
                 attacker_atk_total=result.attacker_atk,
                 defender_atk_total=result.defender_atk,
                 planet_changed_owner=result.planet_changes_owner,
-                losses_json={
-                    "attacker": result.attacker_losses,
-                    "defender": result.defender_losses,
-                },
-            )
-            db.add(combat_entry)
+                losses_json={"attacker": result.attacker_losses, "defender": result.defender_losses},
+            ))
             combats_resolved += 1
 
             await db.execute(delete(Ship).where(Ship.planet_id == target_planet.id))
             for ship_type, qty in result.defender_survivors.items():
                 if qty > 0:
-                    db.add(Ship(
-                        owner_id=target_planet.owner_id,
-                        planet_id=target_planet.id,
-                        ship_type=ship_type,
-                        quantity=qty,
-                    ))
+                    db.add(Ship(owner_id=target_planet.owner_id, planet_id=target_planet.id, ship_type=ship_type, quantity=qty))
 
             if result.planet_changes_owner:
                 old_owner = target_planet.owner_id
                 target_planet.owner_id = mission.owner_id
                 for ship_type, qty in result.attacker_survivors.items():
                     if qty > 0:
-                        db.add(Ship(
-                            owner_id=mission.owner_id,
-                            planet_id=target_planet.id,
-                            ship_type=ship_type,
-                            quantity=qty,
-                        ))
-                db.add(Notification(
-                    user_id=mission.owner_id,
-                    type="planet_captured",
-                    title=f"Planet erobret: {target_planet.name}",
-                    body=f"Du vant kampen og tok over planeten!",
-                    related_id=target_planet.id,
-                ))
+                        db.add(Ship(owner_id=mission.owner_id, planet_id=target_planet.id, ship_type=ship_type, quantity=qty))
+                db.add(Notification(user_id=mission.owner_id, type="planet_captured",
+                    title=f"Planet erobret: {target_planet.name}", body="Du vant kampen og tok over planeten!", related_id=target_planet.id))
                 if old_owner:
-                    db.add(Notification(
-                        user_id=old_owner,
-                        type="planet_lost",
-                        title=f"Planet tapt: {target_planet.name}",
-                        body=f"Planeten din ble erobret!",
-                        related_id=target_planet.id,
-                    ))
+                    db.add(Notification(user_id=old_owner, type="planet_lost",
+                        title=f"Planet tapt: {target_planet.name}", body="Planeten din ble erobret!", related_id=target_planet.id))
             else:
                 for ship_type, qty in result.attacker_survivors.items():
                     if qty > 0:
                         await _return_ships(db, mission.owner_id, origin_planet.id, ship_type, qty, tick)
-                db.add(Notification(
-                    user_id=mission.owner_id,
-                    type="attack_failed",
+                db.add(Notification(user_id=mission.owner_id, type="attack_failed",
                     title=f"Angrep mislyktes: {target_planet.name}",
-                    body=f"Angrep: {result.attacker_atk} vs Forsvar: {result.defender_atk}",
-                    related_id=target_planet.id,
-                ))
+                    body=f"Angrep: {result.attacker_atk} vs Forsvar: {result.defender_atk}", related_id=target_planet.id))
                 if target_planet.owner_id:
-                    db.add(Notification(
-                        user_id=target_planet.owner_id,
-                        type="attack_repelled",
+                    db.add(Notification(user_id=target_planet.owner_id, type="attack_repelled",
                         title=f"Angrep avverget: {target_planet.name}",
-                        body=f"Angrep: {result.attacker_atk} vs ditt forsvar: {result.defender_atk}",
-                        related_id=target_planet.id,
-                    ))
+                        body=f"Angrep: {result.attacker_atk} vs ditt forsvar: {result.defender_atk}", related_id=target_planet.id))
 
             if expedition_qty > 0:
                 await _return_ships(db, mission.owner_id, origin_planet.id, "expedition", expedition_qty, tick)
@@ -306,7 +330,15 @@ async def _process_tick(db: AsyncSession):
             mission.status = "completed"
             missions_resolved += 1
 
-        # ── Return mission ────────────────────────────────────
+        # ── Expedition ────────────────────────────────────────
+        elif mission.mission_type == "expedition":
+            # FOW er allerede håndtert over — skip returnerer hjem
+            for ship_type, qty in mission_ships.items():
+                await _return_ships(db, mission.owner_id, origin_planet.id, ship_type, qty, tick)
+            mission.status = "completed"
+            missions_resolved += 1
+
+        # ── Return ────────────────────────────────────────────
         elif mission.status == "returning":
             for ship_type, qty in mission_ships.items():
                 existing = await db.scalar(
@@ -319,72 +351,46 @@ async def _process_tick(db: AsyncSession):
                 if existing:
                     existing.quantity += qty
                 else:
-                    db.add(Ship(
-                        owner_id=mission.owner_id,
-                        planet_id=origin_planet.id,
-                        ship_type=ship_type,
-                        quantity=qty,
-                    ))
+                    db.add(Ship(owner_id=mission.owner_id, planet_id=origin_planet.id, ship_type=ship_type, quantity=qty))
             mission.status = "completed"
             missions_resolved += 1
 
-    # ── 6. Update blockade status ─────────────────────────────
+    # ── 6. Blockade status ────────────────────────────────────
     for planet in planet_list:
         if not planet.owner_id:
             continue
-        enemy_ships = await db.scalar(
-            select(Ship).where(
-                Ship.planet_id == planet.id,
-                Ship.owner_id != planet.owner_id,
-                Ship.quantity > 0,
-            )
+        enemy = await db.scalar(
+            select(Ship).where(Ship.planet_id == planet.id, Ship.owner_id != planet.owner_id, Ship.quantity > 0)
         )
-        planet.blockade_status = "blockaded" if enemy_ships else "none"
+        planet.blockade_status = "blockaded" if enemy else "none"
 
-    # ── 7. NPC defense respawn (every N ticks) ────────────────
+    # ── 7. NPC respawn ────────────────────────────────────────
     if tick % NPC_RESPAWN_INTERVAL == 0:
         npc_planets = await db.scalars(
-            select(Planet).where(
-                text("planet_type::text = 'npc'"),
-                Planet.owner_id == None,
-            )
+            select(Planet).where(text("planet_type::text = 'npc'"), Planet.owner_id == None)
         )
         for planet in npc_planets.all():
-            existing = await db.scalar(
-                select(Ship).where(
-                    Ship.planet_id == planet.id,
-                    Ship.ship_type == "planet_defense",
-                )
-            )
+            existing = await db.scalar(select(Ship).where(Ship.planet_id == planet.id, Ship.ship_type == "planet_defense"))
             if existing:
                 existing.quantity = min(existing.quantity + NPC_RESPAWN_AMOUNT, 10)
             else:
-                db.add(Ship(
-                    owner_id=None,
-                    planet_id=planet.id,
-                    ship_type="planet_defense",
-                    quantity=NPC_RESPAWN_AMOUNT,
-                ))
+                db.add(Ship(owner_id=None, planet_id=planet.id, ship_type="planet_defense", quantity=NPC_RESPAWN_AMOUNT))
 
-    # ── 8. Calculate scores ───────────────────────────────────
+    # ── 8. Scores ─────────────────────────────────────────────
     players = await db.scalars(select(User).where(User.role == "player"))
     for player in players.all():
-        owned_planets = await db.scalars(
-            select(Planet).where(Planet.owner_id == player.id)
-        )
+        owned_planets = await db.scalars(select(Planet).where(Planet.owner_id == player.id))
         owned = list(owned_planets.all())
-        planet_count = len(owned)
-        total_resources = sum(p.metal + p.energy + p.gas for p in owned)
-        score = total_resources * planet_count
+        score = sum(p.metal + p.energy + p.gas for p in owned) * len(owned)
         for p in owned:
             p.score = score
 
-    # ── 9. Check round end ────────────────────────────────────
+    # ── 9. Round end ──────────────────────────────────────────
     if round_.ends_at and datetime.now(timezone.utc) >= round_.ends_at:
         round_.status = "ended"
         log.info(f"Round {round_.id} ended at tick {tick}")
 
-    # ── 10. Finalize tick ─────────────────────────────────────
+    # ── 10. Finalize ──────────────────────────────────────────
     round_.current_tick = tick
     tick_log.ended_at = datetime.now(timezone.utc)
     tick_log.status = "completed"
@@ -396,19 +402,10 @@ async def _process_tick(db: AsyncSession):
     log.info(f"Tick {tick} complete — planets:{planets_processed} missions:{missions_resolved} combats:{combats_resolved}")
 
 
-async def _return_ships(
-    db: AsyncSession,
-    owner_id,
-    origin_planet_id,
-    ship_type: str,
-    qty: int,
-    current_tick: int,
-):
-    """Create a return mission for ships heading home."""
+async def _return_ships(db, owner_id, origin_planet_id, ship_type, qty, current_tick):
     origin = await db.get(Planet, origin_planet_id)
     if not origin:
         return
-
     return_mission = FleetMission(
         owner_id=owner_id,
         origin_planet_id=origin_planet_id,
@@ -420,46 +417,26 @@ async def _return_ships(
     )
     db.add(return_mission)
     await db.flush()
-    db.add(FleetMissionShip(
-        mission_id=return_mission.id,
-        ship_type=ship_type,
-        quantity=qty,
-    ))
+    db.add(FleetMissionShip(mission_id=return_mission.id, ship_type=ship_type, quantity=qty))
 
 
 async def respawn_npc_defenses_async():
-    """Standalone NPC respawn — called by beat separately if needed."""
     async with AsyncSessionLocal() as db:
         npc_planets = await db.scalars(
-            select(Planet).where(
-                text("planet_type::text = 'npc'"),
-                Planet.owner_id == None,
-            )
+            select(Planet).where(text("planet_type::text = 'npc'"), Planet.owner_id == None)
         )
         for planet in npc_planets.all():
-            existing = await db.scalar(
-                select(Ship).where(
-                    Ship.planet_id == planet.id,
-                    Ship.ship_type == "planet_defense",
-                )
-            )
+            existing = await db.scalar(select(Ship).where(Ship.planet_id == planet.id, Ship.ship_type == "planet_defense"))
             if existing:
                 existing.quantity = min(existing.quantity + NPC_RESPAWN_AMOUNT, 10)
             else:
-                db.add(Ship(
-                    owner_id=None,
-                    planet_id=planet.id,
-                    ship_type="planet_defense",
-                    quantity=NPC_RESPAWN_AMOUNT,
-                ))
+                db.add(Ship(owner_id=None, planet_id=planet.id, ship_type="planet_defense", quantity=NPC_RESPAWN_AMOUNT))
         await db.commit()
 
 
 async def check_round_end_async():
     async with AsyncSessionLocal() as db:
-        round_ = await db.scalar(
-            select(GameRound).where(text("status::text = 'active'"))
-        )
+        round_ = await db.scalar(select(GameRound).where(text("status::text = 'active'")))
         if round_ and round_.ends_at and datetime.now(timezone.utc) >= round_.ends_at:
             round_.status = "ended"
             await db.commit()

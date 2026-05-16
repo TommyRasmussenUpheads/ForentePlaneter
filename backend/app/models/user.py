@@ -29,6 +29,9 @@ class User(Base):
     invites_remaining: Mapped[int] = mapped_column(Integer, default=100)
     invited_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
+    # Fog of war — settes True når første ekspedisjonsskip er bygget
+    has_built_expedition: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
