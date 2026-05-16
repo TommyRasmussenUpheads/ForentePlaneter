@@ -73,7 +73,6 @@ async def get_my_missions(
         origin = await db.get(Planet, m.origin_planet_id)
         target = await db.get(Planet, m.target_planet_id)
 
-        # Get current tick for ETA
         round_ = await db.scalar(select(GameRound).order_by(GameRound.id.desc()))
         current_tick = round_.current_tick if round_ else 0
 
@@ -125,9 +124,7 @@ async def send_fleet(
     if origin.owner_id != current_user.id:
         raise HTTPException(403, "Du eier ikke opprinnelsesplaneten")
 
-    # Transport missions require ambassador (simplified: check ownership for now)
     if body.mission_type == "transport" and target.owner_id != current_user.id:
-        # Check if there's an ambassador (simplified check)
         raise HTTPException(403, "Du kan kun sende transport til egne planeter eller planeter med ambassade")
 
     # Verify ships are available
@@ -160,23 +157,20 @@ async def send_fleet(
     round_ = await db.scalar(select(GameRound).order_by(GameRound.id.desc()))
     current_tick = round_.current_tick if round_ else 0
 
-    # Determine travel ticks
     origin_system = await db.get(SolarSystem, origin.solar_system_id)
     target_system = await db.get(SolarSystem, target.solar_system_id)
 
     if origin.solar_system_id == target.solar_system_id:
-        # Same system — use planet's travel_ticks from home
         travel_ticks = target.travel_ticks if target.travel_ticks > 0 else 1
     else:
-        # Inter-system — 6 ticks (or 1 for diplomat)
         has_diplomat = "diplomat" in body.ships and body.ships["diplomat"] > 0
         all_expedition = all(
             t in ("expedition", "diplomat") for t in body.ships if body.ships[t] > 0
         )
         if has_diplomat and len([k for k, v in body.ships.items() if v > 0]) == 1:
-            travel_ticks = 1  # diplomat alone = 6x speed
+            travel_ticks = 1
         elif all_expedition:
-            travel_ticks = 3  # expedition = half time
+            travel_ticks = 3
         else:
             travel_ticks = 6
 
@@ -264,6 +258,8 @@ async def build_ships(
         raise HTTPException(403, "Planeten er under blokade — kan kun bygge diplomatskip")
 
     costs = SHIP_BUILD_COSTS[body.ship_type]
+
+    # Beregn totalkostnad for alle skipene
     total_metal  = costs["metal"]  * body.quantity
     total_energy = costs["energy"] * body.quantity
     total_gas    = costs["gas"]    * body.quantity
@@ -274,42 +270,51 @@ async def build_ships(
             f"har {planet.metal}M {planet.energy}E {planet.gas}G"
         )
 
-    # Get queue position
+    # Hent eksisterende kø for å finne neste posisjon og om noe allerede bygger
     existing_queue = await db.scalars(
         select(BuildQueue).where(
             BuildQueue.planet_id == planet.id,
             BuildQueue.status.in_(["queued", "building"]),
-        )
+        ).order_by(BuildQueue.queue_position)
     )
     queue_items = list(existing_queue.all())
-    position = len(queue_items) + 1
+    next_position = len(queue_items) + 1
 
-    # Deduct resources
+    # Trekk ressurser for alle skipene på én gang
     planet.metal  -= total_metal
     planet.energy -= total_energy
     planet.gas    -= total_gas
 
-    bq = BuildQueue(
-        planet_id=planet.id,
-        owner_id=current_user.id,
-        ship_type=body.ship_type,
-        quantity=body.quantity,
-        ticks_remaining=costs["ticks"],
-        ticks_total=costs["ticks"],
-        status="queued" if queue_items else "building",
-        queue_position=position,
-        metal_cost=total_metal,
-        energy_cost=total_energy,
-        gas_cost=total_gas,
-    )
-    db.add(bq)
+    # Lag én rad per skip i køen
+    # Første skip i en tom kø starter som "building", resten er "queued"
+    for i in range(body.quantity):
+        is_first_overall = (not queue_items) and (i == 0)
+        bq = BuildQueue(
+            planet_id=planet.id,
+            owner_id=current_user.id,
+            ship_type=body.ship_type,
+            quantity=1,
+            ticks_remaining=costs["ticks"],
+            ticks_total=costs["ticks"],
+            status="building" if is_first_overall else "queued",
+            queue_position=next_position + i,
+            metal_cost=costs["metal"],
+            energy_cost=costs["energy"],
+            gas_cost=costs["gas"],
+        )
+        db.add(bq)
+
     await db.commit()
 
+    eta_first = costs["ticks"]
+    eta_last  = costs["ticks"] * body.quantity if not queue_items else costs["ticks"] * (len(queue_items) + body.quantity)
+
     return {
-        "message": f"Bygger {body.quantity}× {body.ship_type}",
-        "queue_position": position,
-        "ticks_remaining": costs["ticks"],
-        "cost": {"metal": total_metal, "energy": total_energy, "gas": total_gas},
+        "message": f"Bygger {body.quantity}× {body.ship_type} — første klar om {eta_first} tick(s), siste om {eta_last} tick(s)",
+        "queue_position_start": next_position,
+        "queue_position_end": next_position + body.quantity - 1,
+        "ticks_per_ship": costs["ticks"],
+        "total_cost": {"metal": total_metal, "energy": total_energy, "gas": total_gas},
     }
 
 
