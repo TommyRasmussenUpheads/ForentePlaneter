@@ -60,7 +60,6 @@ services:
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Forente Planeter}
       GAME_BASE_URL: ${GAME_BASE_URL:-http://localhost:5173}
       INVITES_PER_PLAYER: ${INVITES_PER_PLAYER:-100}
-      CORS_ORIGINS: ${CORS_ORIGINS:-}
     depends_on:
       db:
         condition: service_healthy
@@ -100,6 +99,12 @@ services:
     volumes:
       - ./backend:/app
     command: celery -A app.worker worker --loglevel=info
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.worker", "inspect", "ping", "--timeout", "5"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ── Celery Beat (hourly tick scheduler) ──────────────────────
   beat:
