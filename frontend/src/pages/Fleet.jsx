@@ -27,8 +27,8 @@ const TRANSPORT_TYPES  = new Set(["transport"])
 
 function classifyFleet(ships) {
   const active = Object.entries(ships).filter(([, q]) => q > 0).map(([t]) => t)
-  if (active.some(t => MILITARY_TYPES.has(t)))   return "military"
-  if (active.some(t => TRANSPORT_TYPES.has(t)))  return "transport"
+  if (active.some(t => MILITARY_TYPES.has(t)))  return "military"
+  if (active.some(t => TRANSPORT_TYPES.has(t))) return "transport"
   return "expedition"
 }
 
@@ -81,7 +81,7 @@ function ShipGrid({ available, selected, onChange }) {
 
 function Steps({ current, steps }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 20 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 20, flexWrap: "wrap" }}>
       {steps.map((s, i) => (
         <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <div style={{
@@ -109,7 +109,7 @@ function Steps({ current, steps }) {
 // ── Send-flåte wizard ─────────────────────────────────────────
 
 function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
-  const [step, setStep] = useState(0)  // 0=skip, 1=destinasjon, 2=hensikt, 3=bekreft
+  const [step, setStep] = useState(0)
   const [originId, setOriginId] = useState(myPlanets[0]?.id || "")
   const [selectedShips, setSelectedShips] = useState({})
   const [targetSystemId, setTargetSystemId] = useState("")
@@ -136,10 +136,12 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
   const planetsInSystem = (targetSystem?.planets || []).filter(p => p.id !== originId)
   const targetPlanet = planetsInSystem.find(p => p.id === targetPlanetId)
 
+  // Er målplaneten eid av spilleren?
+  const targetIsOwn = targetPlanet?.is_own || false
+
   // Beregn reisetid
   const originTP = targetPlanets.find(p => p.id === originId)
-  const sameSystem = originTP?.system_id === targetSystemId ||
-    myPlanets.find(p => p.id === originId)?.system_id === targetSystemId
+  const sameSystem = originTP?.system_id === targetSystemId
   let travelTicks = "?"
   if (targetPlanetId) {
     if (sameSystem) {
@@ -149,6 +151,36 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
       const onlyDiplomat = Object.keys(selectedShips).filter(t => selectedShips[t] > 0).join("") === "diplomat"
       travelTicks = onlyDiplomat ? 1 : onlyExp ? 3 : 6
     }
+  }
+
+  // Bestem steg basert på flåtetype og målplanet
+  function getSteps() {
+    if (fleetClass === "expedition") return ["Skip", "Destinasjon", "Bekreft"]
+    if (fleetClass === "transport")  return ["Skip", "Destinasjon", "Last", "Bekreft"]
+    if (targetIsOwn)                 return ["Skip", "Destinasjon", "Bekreft"]
+    return ["Skip", "Destinasjon", "Hensikt", "Bekreft"]
+  }
+
+  // Hopp over hensiktsvalg for egne planeter og ekspedisjon
+  function goToNext() {
+    if (fleetClass === "expedition") {
+      setMissionType("expedition")
+      setStep(2) // hopp til bekreft
+    } else if (fleetClass === "transport") {
+      setMissionType("transport")
+      setStep(2) // last
+    } else if (targetIsOwn) {
+      setMissionType("move")
+      setStep(2) // hopp til bekreft
+    } else {
+      setStep(2) // hensiktsvalg
+    }
+  }
+
+  // Konfirmer-steg er alltid siste steg
+  function getConfirmStep() {
+    const steps = getSteps()
+    return steps.length - 1
   }
 
   function updateShip(type, qty) {
@@ -183,9 +215,8 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
     finally { setSending(false) }
   }
 
-  const STEPS = fleetClass === "transport"
-    ? ["Skip", "Destinasjon", "Last", "Bekreft"]
-    : ["Skip", "Destinasjon", "Hensikt", "Bekreft"]
+  const STEPS = getSteps()
+  const confirmStep = getConfirmStep()
 
   return (
     <div>
@@ -210,7 +241,7 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
             <ShipGrid available={shipsHere} selected={selectedShips} onChange={updateShip} />
           )}
           {totalSelected > 0 && (
-            <button className="btn primary" onClick={() => setStep(1)} style={{ width: "100%", marginTop: 14 }}>
+            <button className="btn" onClick={() => setStep(1)} style={{ width: "100%", marginTop: 14 }}>
               {totalSelected} skip valgt — Velg destinasjon →
             </button>
           )}
@@ -254,7 +285,7 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
                     fontFamily: "var(--mono)", fontSize: 12,
                     color: targetPlanetId === p.id ? "var(--teal)" : "var(--text2)",
                   }}>
-                    <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 3 }}>
+                    <div style={{ fontSize: 10, color: p.is_own ? "var(--teal)" : "var(--text3)", marginBottom: 3 }}>
                       {p.planet_type.toUpperCase()}{p.is_own ? " ★" : ""}
                     </div>
                     {p.name}
@@ -267,8 +298,10 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
           {targetPlanetId && (
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn ghost" onClick={() => setStep(0)} style={{ flex: 1 }}>← Tilbake</button>
-              <button className="btn" onClick={() => setStep(2)} style={{ flex: 2 }}>
-                Velg {fleetClass === "transport" ? "last" : "hensikt"} →
+              <button className="btn" onClick={goToNext} style={{ flex: 2 }}>
+                {fleetClass === "transport" ? "Velg last →" :
+                 fleetClass === "expedition" || targetIsOwn ? "Bekreft →" :
+                 "Velg hensikt →"}
               </button>
             </div>
           )}
@@ -278,8 +311,8 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
         </div>
       )}
 
-      {/* Steg 2: Hensikt eller Last */}
-      {step === 2 && (
+      {/* Steg 2: Hensikt (militær mot fremmed planet) eller Last (transport) */}
+      {step === 2 && step < confirmStep && (
         <div>
           {/* Reisetid-info */}
           <div style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "8px 12px", background: "var(--bg3)", borderRadius: "var(--radius)", marginBottom: 14, display: "flex", justifyContent: "space-between" }}>
@@ -287,8 +320,8 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
             <span style={{ color: "var(--teal)" }}>{travelTicks} tick(s)</span>
           </div>
 
-          {/* Militær: velg angrep / forsvar */}
-          {fleetClass === "military" && (
+          {/* Militær mot fremmed planet */}
+          {fleetClass === "military" && !targetIsOwn && (
             <div>
               <div className="label" style={{ marginBottom: 12 }}>Hva er oppdraget?</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
@@ -318,25 +351,14 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
             </div>
           )}
 
-          {/* Ekspedisjon: ingen valg */}
-          {fleetClass === "expedition" && (
-            <div style={{ padding: "20px", background: "rgba(192,132,252,0.1)", border: "1px solid #c084fc", borderRadius: "var(--radius)", textAlign: "center", marginBottom: 14 }}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>◉</div>
-              <div style={{ fontFamily: "var(--mono)", fontSize: 13, color: "#c084fc", marginBottom: 4 }}>EKSPEDISJON</div>
-              <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)" }}>
-                Skipene utforsker systemet og returnerer automatisk
-              </div>
-            </div>
-          )}
-
           {/* Transport: velg last */}
           {fleetClass === "transport" && (
             <div>
               <div className="label" style={{ marginBottom: 12 }}>Velg last</div>
               {[
-                { key: "metal", label: "Metall", color: "#7ab8f5", max: originPlanet?.resources?.metal || 0 },
+                { key: "metal",  label: "Metall", color: "#7ab8f5", max: originPlanet?.resources?.metal  || 0 },
                 { key: "energy", label: "Energi", color: "#f0a500", max: originPlanet?.resources?.energy || 0 },
-                { key: "gas",   label: "Gass",   color: "#7de88a", max: originPlanet?.resources?.gas || 0 },
+                { key: "gas",    label: "Gass",   color: "#7de88a", max: originPlanet?.resources?.gas    || 0 },
               ].map(r => (
                 <div key={r.key} style={{ marginBottom: 12 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
@@ -363,12 +385,8 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
 
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn ghost" onClick={() => setStep(1)} style={{ flex: 1 }}>← Tilbake</button>
-            <button className="btn" onClick={() => {
-              if (fleetClass === "expedition") setMissionType("expedition")
-              if (fleetClass === "transport") setMissionType("transport")
-              setStep(3)
-            }}
-              disabled={fleetClass === "military" && !missionType}
+            <button className="btn" onClick={() => setStep(confirmStep)}
+              disabled={fleetClass === "military" && !targetIsOwn && !missionType}
               style={{ flex: 2 }}>
               Bekreft →
             </button>
@@ -376,8 +394,8 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
         </div>
       )}
 
-      {/* Steg 3: Bekreft */}
-      {step === 3 && (
+      {/* Bekreft-steg */}
+      {step === confirmStep && (
         <div>
           <div style={{ background: "var(--bg3)", borderRadius: "var(--radius)", padding: 14, marginBottom: 14 }}>
             <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)", marginBottom: 10 }}>OPPSUMMERING</div>
@@ -394,8 +412,11 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
               <span style={{ fontFamily: "var(--mono)", fontSize: 12, color:
                 missionType === "attack" ? "var(--red)" :
                 missionType === "defend" ? "var(--teal)" :
-                missionType === "expedition" ? "#c084fc" : "#7de88a"
-              }}>{missionType?.toUpperCase()}</span>
+                missionType === "expedition" ? "#c084fc" :
+                missionType === "move" ? "var(--teal)" : "#7de88a"
+              }}>
+                {missionType === "move" ? "FLYTT" : missionType?.toUpperCase()}
+              </span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)" }}>Reisetid</span>
@@ -415,9 +436,9 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
               <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, marginTop: 10 }}>
                 <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)", marginBottom: 6 }}>LAST</div>
                 <div style={{ display: "flex", gap: 12, fontFamily: "var(--mono)", fontSize: 12 }}>
-                  {cargo.metal > 0 && <span style={{ color: "#7ab8f5" }}>M: {cargo.metal.toLocaleString()}</span>}
+                  {cargo.metal > 0  && <span style={{ color: "#7ab8f5" }}>M: {cargo.metal.toLocaleString()}</span>}
                   {cargo.energy > 0 && <span style={{ color: "#f0a500" }}>E: {cargo.energy.toLocaleString()}</span>}
-                  {cargo.gas > 0 && <span style={{ color: "#7de88a" }}>G: {cargo.gas.toLocaleString()}</span>}
+                  {cargo.gas > 0    && <span style={{ color: "#7de88a" }}>G: {cargo.gas.toLocaleString()}</span>}
                 </div>
               </div>
             )}
@@ -427,13 +448,15 @@ function SendWizard({ myPlanets, allShips, targetPlanets, token, onSent }) {
           {err && <div style={{ background: "var(--red-dim)", border: "1px solid var(--red)", borderRadius: "var(--radius)", padding: "10px 14px", fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)", marginBottom: 12 }}>⚠ {err}</div>}
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn ghost" onClick={() => setStep(2)} style={{ flex: 1 }} disabled={sending}>← Tilbake</button>
-            <button className="btn primary" onClick={handleSend} disabled={sending} style={{ flex: 2,
-              borderColor: missionType === "attack" ? "var(--red)" : "var(--teal)",
+            <button className="btn ghost" onClick={() => setStep(step - 1)} style={{ flex: 1 }} disabled={sending}>← Tilbake</button>
+            <button onClick={handleSend} disabled={sending} style={{
+              flex: 2, padding: "8px 20px", borderRadius: "var(--radius)", cursor: "pointer",
+              border: `1px solid ${missionType === "attack" ? "var(--red)" : "var(--teal)"}`,
               background: missionType === "attack" ? "var(--red-dim)" : "var(--teal-dim)",
               color: missionType === "attack" ? "var(--red)" : "var(--teal)",
+              fontFamily: "var(--sans)", fontWeight: 600, fontSize: 13, letterSpacing: "0.08em",
             }}>
-              {sending ? "Sender..." : `→ Send ${missionType?.toUpperCase()}`}
+              {sending ? "Sender..." : `→ ${missionType === "move" ? "FLYTT" : missionType?.toUpperCase()}`}
             </button>
           </div>
           <button className="btn ghost" onClick={reset} style={{ width: "100%", marginTop: 8, fontSize: 11 }}>↺ Start på nytt</button>
@@ -524,9 +547,9 @@ export default function Fleet() {
                   <span style={{
                     fontFamily: "var(--mono)", fontSize: 10, padding: "2px 8px",
                     borderRadius: "var(--radius)", border: "1px solid",
-                    borderColor: m.type === "attack" ? "var(--red)" : m.type === "expedition" ? "#c084fc" : m.type === "defend" ? "var(--teal)" : "#7de88a",
-                    color: m.type === "attack" ? "var(--red)" : m.type === "expedition" ? "#c084fc" : m.type === "defend" ? "var(--teal)" : "#7de88a",
-                  }}>{m.type.toUpperCase()}</span>
+                    borderColor: m.type === "attack" ? "var(--red)" : m.type === "expedition" ? "#c084fc" : m.type === "defend" ? "var(--teal)" : m.type === "move" ? "var(--teal)" : "#7de88a",
+                    color: m.type === "attack" ? "var(--red)" : m.type === "expedition" ? "#c084fc" : "var(--teal)",
+                  }}>{m.type === "move" ? "FLYTT" : m.type.toUpperCase()}</span>
                   <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--amber)" }}>{m.ticks_remaining}t</span>
                 </div>
                 <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text2)", marginBottom: 6 }}>
@@ -620,8 +643,7 @@ export default function Fleet() {
                 return (
                   <div key={type} style={{
                     border: `1px solid ${color}44`, borderRadius: "var(--radius)",
-                    background: `${color}0d`, padding: "10px 10px 8px",
-                    textAlign: "center",
+                    background: `${color}0d`, padding: "10px 10px 8px", textAlign: "center",
                   }}>
                     <div style={{ fontSize: 24, color, marginBottom: 4 }}>{SHIP_ICONS[type]}</div>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 20, fontWeight: 600, color, marginBottom: 2 }}>{qty}</div>

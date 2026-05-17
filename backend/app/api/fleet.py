@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
-from typing import Optional
 import uuid
 
 from app.core.database import get_db
@@ -112,7 +111,7 @@ async def get_my_missions(
 class SendFleetRequest(BaseModel):
     origin_planet_id: str
     target_planet_id: str
-    mission_type: str   # attack | defend | transport | expedition
+    mission_type: str   # attack | defend | transport | expedition | move
     ships: dict[str, int]
     cargo_metal: int = 0
     cargo_energy: int = 0
@@ -125,7 +124,7 @@ async def send_fleet(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if body.mission_type not in ("attack", "defend", "transport", "expedition"):
+    if body.mission_type not in ("attack", "defend", "transport", "expedition", "move"):
         raise HTTPException(400, "Ugyldig oppdragstype")
 
     origin = await db.get(Planet, uuid.UUID(body.origin_planet_id))
@@ -140,7 +139,6 @@ async def send_fleet(
     if not active_ships:
         raise HTTPException(400, "Velg minst ett skip")
 
-    # Valider tilgjengelighet
     for ship_type, qty in active_ships.items():
         if ship_type not in SHIP_STATS:
             raise HTTPException(400, f"Ukjent skiptype: {ship_type}")
@@ -155,6 +153,10 @@ async def send_fleet(
             raise HTTPException(400,
                 f"Ikke nok {ship_type} (har {available.quantity if available else 0}, trenger {qty})"
             )
+
+    # "move" er kun tillatt til egne planeter
+    if body.mission_type == "move" and target.owner_id != current_user.id:
+        raise HTTPException(403, "Kan kun flytte skip til egne planeter")
 
     # Valider last for transport
     if body.mission_type == "transport":
@@ -221,7 +223,7 @@ async def send_fleet(
     for ship_type, qty in active_ships.items():
         db.add(FleetMissionShip(mission_id=mission.id, ship_type=ship_type, quantity=qty))
 
-    # ── Tidlig varsling ved angrep ────────────────────────────
+    # Tidlig varsling ved angrep
     if body.mission_type == "attack" and target.owner_id and target.owner_id != current_user.id:
         planet_defense = await db.scalar(
             select(Ship).where(
@@ -234,7 +236,7 @@ async def send_fleet(
             db.add(Notification(
                 user_id=target.owner_id,
                 type="attack_incoming",
-                title=f"⚠ Fiendtlig flåte oppdaget!",
+                title="⚠ Fiendtlig flåte oppdaget!",
                 body=f"Planetforsvaret på {target.name} har oppdaget en innkommende fiendtlig flåte. Ankomst om {travel_ticks} tick(s).",
                 related_id=target.id,
             ))

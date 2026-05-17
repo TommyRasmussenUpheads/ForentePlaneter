@@ -243,6 +243,28 @@ async def _process_tick(db: AsyncSession):
             mission.status = "completed"
             missions_resolved += 1
 
+        # ── Move: flytt skip til egen planet ─────────────────
+        elif mission.mission_type == "move":
+            for ship_type, qty in mission_ships.items():
+                existing = await db.scalar(
+                    select(Ship).where(
+                        Ship.planet_id == target_planet.id,
+                        Ship.owner_id == mission.owner_id,
+                        Ship.ship_type == ship_type,
+                    )
+                )
+                if existing:
+                    existing.quantity += qty
+                else:
+                    db.add(Ship(
+                        owner_id=mission.owner_id,
+                        planet_id=target_planet.id,
+                        ship_type=ship_type,
+                        quantity=qty,
+                    ))
+            mission.status = "completed"
+            missions_resolved += 1
+
         # ── Defend: parker skip på planeten ──────────────────
         elif mission.mission_type == "defend":
             for ship_type, qty in mission_ships.items():
