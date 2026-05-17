@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
+from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
 import uuid
@@ -8,7 +8,7 @@ import uuid
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.galaxy import Planet, SolarSystem, GameRound
-from app.models.game import Ship, FleetMission, FleetMissionShip, BuildQueue
+from app.models.game import Ship, FleetMission, FleetMissionShip, BuildQueue, Notification
 from app.models.user import User
 from app.services.combat import SHIP_STATS
 
@@ -24,6 +24,19 @@ SHIP_BUILD_COSTS = {
     "diplomat":       {"ticks": 8, "metal": 100, "energy": 150, "gas": 80},
 }
 
+EXPEDITION_TYPES = {"expedition"}
+TRANSPORT_TYPES  = {"transport"}
+MILITARY_TYPES   = {"fighter", "cruiser", "bomber", "planet_defense", "diplomat"}
+
+
+def classify_fleet(ships: dict[str, int]) -> str:
+    active = {k for k, v in ships.items() if v > 0}
+    if active & MILITARY_TYPES:
+        return "military"
+    if active & TRANSPORT_TYPES:
+        return "transport"
+    return "expedition"
+
 
 # ── My ships overview ─────────────────────────────────────────
 
@@ -33,20 +46,22 @@ async def get_my_ships(
     current_user: User = Depends(get_current_user),
 ):
     ships = await db.scalars(
-        select(Ship).where(
-            Ship.owner_id == current_user.id,
-            Ship.quantity > 0,
-        )
+        select(Ship).where(Ship.owner_id == current_user.id, Ship.quantity > 0)
     )
     result = {}
     for s in ships.all():
         planet = await db.get(Planet, s.planet_id) if s.planet_id else None
-        planet_name = planet.name if planet else "In transit"
+        system = await db.get(SolarSystem, planet.solar_system_id) if planet else None
         pid = str(s.planet_id) if s.planet_id else "transit"
         if pid not in result:
-            result[pid] = {"planet_name": planet_name, "ships": {}}
+            result[pid] = {
+                "planet_name": planet.name if planet else "In transit",
+                "planet_id": str(s.planet_id) if s.planet_id else None,
+                "system_name": system.name if system else None,
+                "system_id": str(system.id) if system else None,
+                "ships": {}
+            }
         result[pid]["ships"][s.ship_type] = result[pid]["ships"].get(s.ship_type, 0) + s.quantity
-
     return {"locations": result}
 
 
@@ -63,7 +78,6 @@ async def get_my_missions(
             FleetMission.status.in_(["in_flight", "returning"]),
         ).order_by(FleetMission.arrive_tick)
     )
-
     result = []
     for m in missions.all():
         ships_rows = await db.scalars(
@@ -72,10 +86,8 @@ async def get_my_missions(
         ships = {r.ship_type: r.quantity for r in ships_rows.all()}
         origin = await db.get(Planet, m.origin_planet_id)
         target = await db.get(Planet, m.target_planet_id)
-
         round_ = await db.scalar(select(GameRound).order_by(GameRound.id.desc()))
         current_tick = round_.current_tick if round_ else 0
-
         result.append({
             "id": str(m.id),
             "type": m.mission_type,
@@ -95,13 +107,13 @@ async def get_my_missions(
     return result
 
 
-# ── Send fleet mission ────────────────────────────────────────
+# ── Send fleet ────────────────────────────────────────────────
 
 class SendFleetRequest(BaseModel):
     origin_planet_id: str
     target_planet_id: str
-    mission_type: str  # attack | transport | expedition | diplomacy
-    ships: dict[str, int]  # ship_type -> quantity
+    mission_type: str   # attack | defend | transport | expedition
+    ships: dict[str, int]
     cargo_metal: int = 0
     cargo_energy: int = 0
     cargo_gas: int = 0
@@ -113,7 +125,7 @@ async def send_fleet(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if body.mission_type not in ("attack", "transport", "expedition", "diplomacy"):
+    if body.mission_type not in ("attack", "defend", "transport", "expedition"):
         raise HTTPException(400, "Ugyldig oppdragstype")
 
     origin = await db.get(Planet, uuid.UUID(body.origin_planet_id))
@@ -124,13 +136,12 @@ async def send_fleet(
     if origin.owner_id != current_user.id:
         raise HTTPException(403, "Du eier ikke opprinnelsesplaneten")
 
-    if body.mission_type == "transport" and target.owner_id != current_user.id:
-        raise HTTPException(403, "Du kan kun sende transport til egne planeter eller planeter med ambassade")
+    active_ships = {k: v for k, v in body.ships.items() if v > 0}
+    if not active_ships:
+        raise HTTPException(400, "Velg minst ett skip")
 
-    # Verify ships are available
-    for ship_type, qty in body.ships.items():
-        if qty <= 0:
-            continue
+    # Valider tilgjengelighet
+    for ship_type, qty in active_ships.items():
         if ship_type not in SHIP_STATS:
             raise HTTPException(400, f"Ukjent skiptype: {ship_type}")
         available = await db.scalar(
@@ -141,43 +152,40 @@ async def send_fleet(
             )
         )
         if not available or available.quantity < qty:
-            raise HTTPException(400, f"Ikke nok {ship_type} på planeten (har {available.quantity if available else 0}, trenger {qty})")
+            raise HTTPException(400,
+                f"Ikke nok {ship_type} (har {available.quantity if available else 0}, trenger {qty})"
+            )
 
-    # Verify cargo resources
+    # Valider last for transport
     if body.mission_type == "transport":
         total_cargo = body.cargo_metal + body.cargo_energy + body.cargo_gas
-        transport_qty = body.ships.get("transport", 0)
-        max_cargo = transport_qty * 10000
-        if total_cargo > max_cargo:
-            raise HTTPException(400, f"For mye last. Maks {max_cargo} med {transport_qty} transportskip")
+        if total_cargo == 0:
+            raise HTTPException(400, "Velg last å transportere")
+        transport_qty = active_ships.get("transport", 0)
+        if total_cargo > transport_qty * 10000:
+            raise HTTPException(400, f"For mye last. Maks {transport_qty * 10000}")
         if body.cargo_metal > origin.metal or body.cargo_energy > origin.energy or body.cargo_gas > origin.gas:
             raise HTTPException(400, "Ikke nok ressurser på planeten")
 
-    # Calculate travel time
+    # Beregn reisetid
     round_ = await db.scalar(select(GameRound).order_by(GameRound.id.desc()))
     current_tick = round_.current_tick if round_ else 0
+    inter_system = origin.solar_system_id != target.solar_system_id
 
-    origin_system = await db.get(SolarSystem, origin.solar_system_id)
-    target_system = await db.get(SolarSystem, target.solar_system_id)
-
-    if origin.solar_system_id == target.solar_system_id:
+    if not inter_system:
         travel_ticks = target.travel_ticks if target.travel_ticks > 0 else 1
     else:
-        has_diplomat = "diplomat" in body.ships and body.ships["diplomat"] > 0
-        all_expedition = all(
-            t in ("expedition", "diplomat") for t in body.ships if body.ships[t] > 0
-        )
-        if has_diplomat and len([k for k, v in body.ships.items() if v > 0]) == 1:
+        only_expedition = all(t in EXPEDITION_TYPES for t in active_ships)
+        only_diplomat   = list(active_ships.keys()) == ["diplomat"]
+        if only_diplomat:
             travel_ticks = 1
-        elif all_expedition:
+        elif only_expedition:
             travel_ticks = 3
         else:
             travel_ticks = 6
 
-    # Deduct ships from origin
-    for ship_type, qty in body.ships.items():
-        if qty <= 0:
-            continue
+    # Trekk skip fra origin
+    for ship_type, qty in active_ships.items():
         ship = await db.scalar(
             select(Ship).where(
                 Ship.planet_id == origin.id,
@@ -189,13 +197,12 @@ async def send_fleet(
         if ship.quantity == 0:
             await db.delete(ship)
 
-    # Deduct cargo from origin
+    # Trekk last
     if body.mission_type == "transport":
         origin.metal  -= body.cargo_metal
         origin.energy -= body.cargo_energy
         origin.gas    -= body.cargo_gas
 
-    # Create mission
     mission = FleetMission(
         owner_id=current_user.id,
         origin_planet_id=origin.id,
@@ -211,12 +218,25 @@ async def send_fleet(
     db.add(mission)
     await db.flush()
 
-    for ship_type, qty in body.ships.items():
-        if qty > 0:
-            db.add(FleetMissionShip(
-                mission_id=mission.id,
-                ship_type=ship_type,
-                quantity=qty,
+    for ship_type, qty in active_ships.items():
+        db.add(FleetMissionShip(mission_id=mission.id, ship_type=ship_type, quantity=qty))
+
+    # ── Tidlig varsling ved angrep ────────────────────────────
+    if body.mission_type == "attack" and target.owner_id and target.owner_id != current_user.id:
+        planet_defense = await db.scalar(
+            select(Ship).where(
+                Ship.planet_id == target.id,
+                Ship.ship_type == "planet_defense",
+                Ship.quantity > 0,
+            )
+        )
+        if planet_defense:
+            db.add(Notification(
+                user_id=target.owner_id,
+                type="attack_incoming",
+                title=f"⚠ Fiendtlig flåte oppdaget!",
+                body=f"Planetforsvaret på {target.name} har oppdaget en innkommende fiendtlig flåte. Ankomst om {travel_ticks} tick(s).",
+                related_id=target.id,
             ))
 
     await db.commit()
@@ -224,9 +244,10 @@ async def send_fleet(
     return {
         "message": f"Flåte sendt — ankommer tick {mission.arrive_tick}",
         "mission_id": str(mission.id),
-        "depart_tick": current_tick,
+        "mission_type": body.mission_type,
         "arrive_tick": mission.arrive_tick,
         "ticks_travel": travel_ticks,
+        "inter_system": inter_system,
     }
 
 
@@ -253,13 +274,10 @@ async def build_ships(
     if not planet or planet.owner_id != current_user.id:
         raise HTTPException(403, "Du eier ikke denne planeten")
 
-    # Check blockade
     if planet.blockade_status == "blockaded" and body.ship_type != "diplomat":
         raise HTTPException(403, "Planeten er under blokade — kan kun bygge diplomatskip")
 
     costs = SHIP_BUILD_COSTS[body.ship_type]
-
-    # Beregn totalkostnad for alle skipene
     total_metal  = costs["metal"]  * body.quantity
     total_energy = costs["energy"] * body.quantity
     total_gas    = costs["gas"]    * body.quantity
@@ -270,7 +288,6 @@ async def build_ships(
             f"har {planet.metal}M {planet.energy}E {planet.gas}G"
         )
 
-    # Hent eksisterende kø for å finne neste posisjon og om noe allerede bygger
     existing_queue = await db.scalars(
         select(BuildQueue).where(
             BuildQueue.planet_id == planet.id,
@@ -280,39 +297,31 @@ async def build_ships(
     queue_items = list(existing_queue.all())
     next_position = len(queue_items) + 1
 
-    # Trekk ressurser for alle skipene på én gang
     planet.metal  -= total_metal
     planet.energy -= total_energy
     planet.gas    -= total_gas
 
-    # Lag én rad per skip i køen
-    # Første skip i en tom kø starter som "building", resten er "queued"
     for i in range(body.quantity):
-        is_first_overall = (not queue_items) and (i == 0)
-        bq = BuildQueue(
+        is_first = (not queue_items) and (i == 0)
+        db.add(BuildQueue(
             planet_id=planet.id,
             owner_id=current_user.id,
             ship_type=body.ship_type,
             quantity=1,
             ticks_remaining=costs["ticks"],
             ticks_total=costs["ticks"],
-            status="building" if is_first_overall else "queued",
+            status="building" if is_first else "queued",
             queue_position=next_position + i,
             metal_cost=costs["metal"],
             energy_cost=costs["energy"],
             gas_cost=costs["gas"],
-        )
-        db.add(bq)
+        ))
 
     await db.commit()
 
-    eta_first = costs["ticks"]
-    eta_last  = costs["ticks"] * body.quantity if not queue_items else costs["ticks"] * (len(queue_items) + body.quantity)
-
     return {
-        "message": f"Bygger {body.quantity}× {body.ship_type} — første klar om {eta_first} tick(s), siste om {eta_last} tick(s)",
+        "message": f"Bygger {body.quantity}× {body.ship_type} — første klar om {costs['ticks']} tick(s)",
         "queue_position_start": next_position,
-        "queue_position_end": next_position + body.quantity - 1,
         "ticks_per_ship": costs["ticks"],
         "total_cost": {"metal": total_metal, "energy": total_energy, "gas": total_gas},
     }
@@ -334,7 +343,6 @@ async def get_build_queue(
             BuildQueue.status.in_(["queued", "building"]),
         ).order_by(BuildQueue.queue_position)
     )
-
     return [
         {
             "id": str(bq.id),
@@ -347,8 +355,6 @@ async def get_build_queue(
         for bq in queue.all()
     ]
 
-
-# ── Ship stats reference ──────────────────────────────────────
 
 @router.get("/ship-stats")
 async def get_ship_stats():

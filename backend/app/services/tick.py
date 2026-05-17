@@ -1,22 +1,5 @@
 """
 Tick processor for Forente Planeter.
-
-Runs every hour via Celery Beat.
-Order of operations:
-1.  Load active round
-2.  Produce resources on all controlled planets
-3.  Advance build queues
-4.  Move all fleets (decrement ticks_remaining)
-5.  Resolve arrivals:
-      a. Transport missions → deliver cargo
-      b. Attack missions → combat
-      c. Expedition missions → reveal fog of war
-      d. Return missions → ships back to origin
-6.  Update blockade status
-7.  NPC defense respawn (every 6 ticks)
-8.  Calculate scores
-9.  Check round end
-10. Write tick log
 """
 import logging
 from datetime import datetime, timezone
@@ -25,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, text
 
 from app.core.database import AsyncSessionLocal
-from app.models.galaxy import GameRound, Planet, SolarSystem, SystemRoute
+from app.models.galaxy import GameRound, Planet, SolarSystem
 from app.models.game import (
     Ship, FleetMission, FleetMissionShip,
     BuildQueue, CombatLog, TickLog, Notification,
@@ -110,7 +93,7 @@ async def _process_tick(db: AsyncSession):
     )
     build_list = list(building.all())
 
-    planet_building: dict[str, list[BuildQueue]] = {}
+    planet_building: dict[str, list] = {}
     for bq in build_list:
         pid = str(bq.planet_id)
         if pid not in planet_building:
@@ -121,7 +104,6 @@ async def _process_tick(db: AsyncSession):
         active = items[0]
         if active.status != "building":
             active.status = "building"
-
         active.ticks_remaining -= 1
 
         if active.ticks_remaining <= 0:
@@ -144,7 +126,7 @@ async def _process_tick(db: AsyncSession):
                     quantity=active.quantity,
                 ))
 
-            # ── Fog of war: første ekspedisjonsskip bygget ───
+            # Fog of war: første ekspedisjonsskip
             if active.ship_type == "expedition" and active.owner_id:
                 owner = await db.get(User, active.owner_id)
                 if owner and not owner.has_built_expedition:
@@ -155,7 +137,7 @@ async def _process_tick(db: AsyncSession):
                         user_id=active.owner_id,
                         type="expedition_built",
                         title="Ekspedisjonsskip ferdigbygd",
-                        body=f"Nabosystemene til ditt solsystem er nå synlige på kartet. Send ekspedisjonsskipet ut for å utforske videre!",
+                        body="Nabosystemene til ditt solsystem er nå synlige på kartet. Send ekspedisjonsskipet ut for å utforske videre!",
                         related_id=active.planet_id,
                     ))
                 else:
@@ -175,11 +157,10 @@ async def _process_tick(db: AsyncSession):
                     related_id=active.planet_id,
                 ))
 
-            # Promoter neste i køen
             if len(items) > 1:
                 items[1].status = "building"
 
-    # ── 4 & 5. Move fleets and resolve arrivals ───────────────
+    # ── 4 & 5. Fleet arrivals ─────────────────────────────────
     in_flight = await db.scalars(
         select(FleetMission).where(
             FleetMission.status.in_(["in_flight", "returning"])
@@ -206,7 +187,7 @@ async def _process_tick(db: AsyncSession):
         target_system = await db.get(SolarSystem, target_planet.solar_system_id)
         inter_system = target_planet.solar_system_id != origin_planet.solar_system_id
 
-        # ── Fog of war: avslør ved ankomst til annet system ──
+        # Fog of war: avslør ved ankomst til annet system
         if inter_system and mission.owner_id:
             newly_revealed = await reveal_system_and_neighbors(
                 db, mission.owner_id, target_planet.solar_system_id
@@ -229,7 +210,6 @@ async def _process_tick(db: AsyncSession):
                     "NPC-system"        if target_system.is_npc else
                     "spillersystem"
                 )
-
                 body = f"Type: {system_type}."
                 if neighbor_names:
                     body += f" Nabosystemer oppdaget: {neighbor_names}."
@@ -260,6 +240,35 @@ async def _process_tick(db: AsyncSession):
             else:
                 for ship_type, qty in mission_ships.items():
                     await _return_ships(db, mission.owner_id, origin_planet.id, ship_type, qty, tick)
+            mission.status = "completed"
+            missions_resolved += 1
+
+        # ── Defend: parker skip på planeten ──────────────────
+        elif mission.mission_type == "defend":
+            for ship_type, qty in mission_ships.items():
+                existing = await db.scalar(
+                    select(Ship).where(
+                        Ship.planet_id == target_planet.id,
+                        Ship.owner_id == mission.owner_id,
+                        Ship.ship_type == ship_type,
+                    )
+                )
+                if existing:
+                    existing.quantity += qty
+                else:
+                    db.add(Ship(
+                        owner_id=mission.owner_id,
+                        planet_id=target_planet.id,
+                        ship_type=ship_type,
+                        quantity=qty,
+                    ))
+            db.add(Notification(
+                user_id=mission.owner_id,
+                type="defend_arrived",
+                title=f"Forsvarsstyrker ankommet",
+                body=f"Dine skip har ankommet {target_planet.name} og er klare til forsvar.",
+                related_id=target_planet.id,
+            ))
             mission.status = "completed"
             missions_resolved += 1
 
@@ -332,7 +341,6 @@ async def _process_tick(db: AsyncSession):
 
         # ── Expedition ────────────────────────────────────────
         elif mission.mission_type == "expedition":
-            # FOW er allerede håndtert over — skip returnerer hjem
             for ship_type, qty in mission_ships.items():
                 await _return_ships(db, mission.owner_id, origin_planet.id, ship_type, qty, tick)
             mission.status = "completed"
@@ -355,7 +363,7 @@ async def _process_tick(db: AsyncSession):
             mission.status = "completed"
             missions_resolved += 1
 
-    # ── 6. Blockade status ────────────────────────────────────
+    # ── 6. Blockade ───────────────────────────────────────────
     for planet in planet_list:
         if not planet.owner_id:
             continue
