@@ -169,12 +169,12 @@ services:
 networks:
   fp_net:
     driver: bridge
-  skydotten_db_net:
-    external: true
     ipam:
       config:
         - subnet: 172.25.0.0/24
           gateway: 172.25.0.1
+  skydotten_db_net:
+    external: true
 
 volumes:
   db_data:
