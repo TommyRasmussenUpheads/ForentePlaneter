@@ -22,3 +22,4 @@ dist/
 # IDE
 .vscode/
 .idea/
+backend/celerybeat-schedule
