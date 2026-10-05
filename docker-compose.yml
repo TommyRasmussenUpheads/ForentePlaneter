@@ -153,14 +153,8 @@ services:
     networks:
       fp_net:
         ipv4_address: 172.25.0.7
-    environment:
-      VITE_API_URL: http://localhost:3200
     depends_on:
       - api
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    command: npm run dev -- --host 0.0.0.0
 
 networks:
   fp_net:
