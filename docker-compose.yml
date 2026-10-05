@@ -44,8 +44,6 @@ services:
       dockerfile: Dockerfile
     container_name: forente_planeter_api
     restart: unless-stopped
-    ports:
-      - "3200:3200"
     networks:
       fp_net:
         ipv4_address: 172.25.0.2
@@ -152,8 +150,6 @@ services:
       dockerfile: Dockerfile
     container_name: forente_planeter_frontend
     restart: unless-stopped
-    ports:
-      - "5173:5173"
     networks:
       fp_net:
         ipv4_address: 172.25.0.7
