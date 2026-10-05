@@ -1,6 +1,5 @@
 services:
 
-  # ── PostgreSQL ────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
     container_name: forente_planeter_db
@@ -14,13 +13,16 @@ services:
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5432:5432"
+    networks:
+      fp_net:
+        ipv4_address: 172.25.0.3
+      skydotten_db_net: {}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U forente_planeter"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── Redis ─────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: forente_planeter_redis
@@ -30,13 +32,16 @@ services:
       - redis_data:/data
     ports:
       - "6379:6379"
+    networks:
+      fp_net:
+        ipv4_address: 172.25.0.4
+      skydotten_db_net: {}
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── FastAPI backend ───────────────────────────────────────────
   api:
     build:
       context: ./backend
@@ -45,6 +50,9 @@ services:
     restart: unless-stopped
     ports:
       - "3200:3200"
+    networks:
+      fp_net:
+        ipv4_address: 172.25.0.2
     environment:
       DATABASE_URL: postgresql+asyncpg://forente_planeter:${DB_PASSWORD}@db:5432/forente_planeter
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -60,6 +68,7 @@ services:
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Forente Planeter}
       GAME_BASE_URL: ${GAME_BASE_URL:-http://localhost:5173}
       INVITES_PER_PLAYER: ${INVITES_PER_PLAYER:-100}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
     depends_on:
       db:
         condition: service_healthy
@@ -69,13 +78,15 @@ services:
       - ./backend:/app
     command: bash -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 3200 --reload"
 
-  # ── Celery worker (tick-motor + tasks) ───────────────────────
   worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: forente_planeter_worker
     restart: unless-stopped
+    networks:
+      fp_net:
+        ipv4_address: 172.25.0.5
     environment:
       DATABASE_URL: postgresql+asyncpg://forente_planeter:${DB_PASSWORD}@db:5432/forente_planeter
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -106,13 +117,15 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── Celery Beat (hourly tick scheduler) ──────────────────────
   beat:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: forente_planeter_beat
     restart: unless-stopped
+    networks:
+      fp_net:
+        ipv4_address: 172.25.0.6
     environment:
       DATABASE_URL: postgresql+asyncpg://forente_planeter:${DB_PASSWORD}@db:5432/forente_planeter
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -137,7 +150,6 @@ services:
       - ./backend:/app
     command: celery -A app.worker beat --loglevel=info --scheduler celery.beat:PersistentScheduler
 
-  # ── React frontend ────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -146,6 +158,9 @@ services:
     restart: unless-stopped
     ports:
       - "5173:5173"
+    networks:
+      fp_net:
+        ipv4_address: 172.25.0.7
     environment:
       VITE_API_URL: http://localhost:3200
     depends_on:
@@ -154,6 +169,16 @@ services:
       - ./frontend:/app
       - /app/node_modules
     command: npm run dev -- --host 0.0.0.0
+
+networks:
+  fp_net:
+    driver: bridge
+  skydotten_db_net:
+    external: true
+    ipam:
+      config:
+        - subnet: 172.25.0.0/24
+          gateway: 172.25.0.1
 
 volumes:
   db_data:
