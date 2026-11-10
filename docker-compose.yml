@@ -12,8 +12,7 @@ services:
       - db_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
-      fp_net:
-        ipv4_address: 172.25.0.3
+      fp_net: {}
       skydotten_db_net: {}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U forente_planeter"]
@@ -29,8 +28,7 @@ services:
     volumes:
       - redis_data:/data
     networks:
-      fp_net:
-        ipv4_address: 172.25.0.4
+      fp_net: {}
       skydotten_db_net: {}
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
@@ -45,8 +43,7 @@ services:
     container_name: forente_planeter_api
     restart: unless-stopped
     networks:
-      fp_net:
-        ipv4_address: 172.25.0.2
+      fp_net: {}
     environment:
       DATABASE_URL: postgresql+asyncpg://forente_planeter:${DB_PASSWORD}@db:5432/forente_planeter
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -79,8 +76,7 @@ services:
     container_name: forente_planeter_worker
     restart: unless-stopped
     networks:
-      fp_net:
-        ipv4_address: 172.25.0.5
+      fp_net: {}
     environment:
       DATABASE_URL: postgresql+asyncpg://forente_planeter:${DB_PASSWORD}@db:5432/forente_planeter
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -118,8 +114,7 @@ services:
     container_name: forente_planeter_beat
     restart: unless-stopped
     networks:
-      fp_net:
-        ipv4_address: 172.25.0.6
+      fp_net: {}
     environment:
       DATABASE_URL: postgresql+asyncpg://forente_planeter:${DB_PASSWORD}@db:5432/forente_planeter
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -151,12 +146,13 @@ services:
     container_name: forente_planeter_frontend
     restart: unless-stopped
     networks:
-      fp_net:
-        ipv4_address: 172.25.0.7
+      fp_net: {}
     depends_on:
       - api
 
 networks:
+  # Ingen faste IP-er (MGMT-256): tjenestene finner hverandre på navn. Lave faste adresser
+  # ble tatt av andre containere (bl.a. NPM) ved omstart, så api og db ikke startet.
   fp_net:
     driver: bridge
     ipam:
